@@ -1,101 +1,190 @@
 import telebot
 from telebot import types
-import time
-import re
-from datetime import datetime, timedelta
 import sqlite3
+import time
+import random
+from datetime import datetime, timedelta
+import re
 import os
-from threading import Lock
+import threading
+import json
 
 # ========== НАСТРОЙКИ ==========
 
-TOKEN = os.environ.get('BOT_TOKEN', "8779825034:AAHpVBWKHGk5-FS4fSZzzBwbRsxQ4L3weys")
+TOKEN = "8259179783:AAHuDseoX6aULdjsWPXT-zWWSNH9-nt6s6U"
 bot = telebot.TeleBot(TOKEN)
 
 # ID главного админа (твой ID)
 MAIN_ADMIN_ID = 8779825034
 
-# Настройки модерации
-FLOOD_TIME = 5  # секунд между сообщениями
-FLOOD_LIMIT = 5  # количество сообщений за FLOOD_TIME секунд
-MAX_MESSAGE_LENGTH = 1000  # максимальная длина сообщения
-MAX_URLS = 2  # максимум ссылок в сообщении
+# Название валюты
+CURRENCY_NAME = "Ириски"
 
-# Ключевые слова для спама/рекламы
+# Настройки модерации
+FLOOD_TIME = 5  # секунд
+FLOOD_LIMIT = 5
+MAX_MESSAGE_LENGTH = 1000
+MAX_WARNS = 3  # макс предупреждений до бана
+
+# Ключевые слова для спама
 SPAM_KEYWORDS = [
     'реклама', 'спам', 'рассылка', 'заработок', 'биткоин', 'крипта',
-    'казино', 'вулкан', 'joy', 'казино', 'промокод', 'скидка', 'акция',
-    'отели', 'booking', 'airbnb', 'kwork', 'фриланс', 'работа на дому'
+    'казино', 'вулкан', 'joy', 'промокод', 'скидка', 'акция',
+    'kwork', 'фриланс', 'работа на дому'
 ]
 
-# Мат-слова (замени на свои)
+# Мат-слова
 BAD_WORDS = [
     'хуй', 'пизда', 'блядь', 'ебать', 'сука', 'нахер', 'нахуй', 'пидор',
-    'гандон', 'мудак', 'долбоеб', 'уебок', 'залупа', 'шлюха'
+    'гандон', 'мудак', 'долбоеб', 'уебок', 'залупа', 'шлюха', 'петух'
 ]
 
 # Ссылки
 LINKS_REGEX = r'(https?://[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?)'
 
+# Статусы для покупки
+STATUSES = {
+    'Новичок': {'price': 100, 'emoji': '🌱'},
+    'Гоблин': {'price': 500, 'emoji': '👺'},
+    'Король': {'price': 1000, 'emoji': '👑'},
+    'Мафиозник': {'price': 2000, 'emoji': '🕴️'},
+    'Киберпанк': {'price': 5000, 'emoji': '🤖'},
+    'Легенда': {'price': 10000, 'emoji': '⭐'}
+}
+
 # ========== БАЗА ДАННЫХ ==========
 
 def init_db():
     """Создание базы данных"""
-    conn = sqlite3.connect('moderator.db', check_same_thread=False)
+    conn = sqlite3.connect('moderate_artem.db', check_same_thread=False)
     cursor = conn.cursor()
-    
-    # Таблица настроек чатов
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_settings (
-            chat_id INTEGER PRIMARY KEY,
-            welcome_message TEXT,
-            rules TEXT,
-            flood_protection INTEGER DEFAULT 1,
-            spam_filter INTEGER DEFAULT 1,
-            link_filter INTEGER DEFAULT 1,
-            bad_words_filter INTEGER DEFAULT 1,
-            captcha_enabled INTEGER DEFAULT 0,
-            log_channel_id INTEGER,
-            welcome_enabled INTEGER DEFAULT 1
-        )
-    ''')
     
     # Таблица пользователей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER,
-            chat_id INTEGER,
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            reg_date TEXT,
+            last_active TEXT,
+            balance INTEGER DEFAULT 0,
             warns INTEGER DEFAULT 0,
-            muted_until TEXT,
-            joined_date TEXT,
+            is_premium INTEGER DEFAULT 0,
+            premium_until TEXT,
+            status TEXT DEFAULT 'Новичок',
+            role TEXT DEFAULT 'user',
             messages_count INTEGER DEFAULT 0,
-            last_message_time REAL,
-            PRIMARY KEY (user_id, chat_id)
+            commands_count INTEGER DEFAULT 0,
+            referrer_id INTEGER,
+            total_spent INTEGER DEFAULT 0
         )
     ''')
     
-    # Таблица для фильтров
+    # Таблица групп
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS custom_filters (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            filter_text TEXT,
-            filter_type TEXT,  -- 'word', 'link', 'regex'
-            action TEXT,  -- 'delete', 'warn', 'ban'
-            created_by INTEGER
+        CREATE TABLE IF NOT EXISTS groups (
+            chat_id INTEGER PRIMARY KEY,
+            chat_title TEXT,
+            added_date TEXT,
+            welcome_message TEXT DEFAULT 'Добро пожаловать в чат, {name}!',
+            rules TEXT DEFAULT '1. Уважайте друг друга\n2. Не спамить\n3. Не материться',
+            flood_protection INTEGER DEFAULT 1,
+            spam_filter INTEGER DEFAULT 1,
+            link_filter INTEGER DEFAULT 1,
+            bad_words_filter INTEGER DEFAULT 1,
+            welcome_enabled INTEGER DEFAULT 1,
+            log_channel_id INTEGER,
+            auto_ban_warns INTEGER DEFAULT 3,
+            mute_time INTEGER DEFAULT 10
         )
     ''')
     
-    # Таблица для логов
+    # Таблица покупок
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS moderation_logs (
+        CREATE TABLE IF NOT EXISTS purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            item_type TEXT,
+            item_name TEXT,
+            price INTEGER,
+            purchase_date TEXT,
+            expires_date TEXT,
+            status TEXT DEFAULT 'active'
+        )
+    ''')
+    
+    # Таблица транзакций
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount INTEGER,
+            type TEXT,
+            description TEXT,
+            date TEXT
+        )
+    ''')
+    
+    # Таблица донатов
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS donations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount INTEGER,
+            stars_amount INTEGER,
+            date TEXT
+        )
+    ''')
+    
+    # Таблица банов/мутов
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mod_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER,
-            action TEXT,
             user_id INTEGER,
             admin_id INTEGER,
+            action TEXT,
             reason TEXT,
-            timestamp TEXT
+            duration INTEGER,
+            date TEXT,
+            expires TEXT
+        )
+    ''')
+    
+    # Таблица для рассылок
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mailings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER,
+            text TEXT,
+            sent_count INTEGER,
+            total_count INTEGER,
+            date TEXT,
+            status TEXT
+        )
+    ''')
+    
+    # Таблица обратной связи
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS support (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            message TEXT,
+            reply TEXT,
+            status TEXT DEFAULT 'open',
+            date TEXT
+        )
+    ''')
+    
+    # Таблица промокодов
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS promocodes (
+            code TEXT PRIMARY KEY,
+            bonus INTEGER,
+            uses INTEGER DEFAULT 0,
+            max_uses INTEGER,
+            expires TEXT
         )
     ''')
     
@@ -108,21 +197,57 @@ init_db()
 
 def get_db():
     """Получить соединение с БД"""
-    return sqlite3.connect('moderator.db', check_same_thread=False)
+    return sqlite3.connect('moderate_artem.db', check_same_thread=False)
 
-def log_action(chat_id, action, user_id, admin_id=None, reason=""):
-    """Запись действия в лог"""
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO moderation_logs (chat_id, action, user_id, admin_id, reason, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (chat_id, action, user_id, admin_id, reason, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+def log_transaction(user_id, amount, type, description):
+    """Запись транзакции"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO transactions (user_id, amount, type, description, date)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user_id, amount, type, description, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def add_user(user):
+    """Добавление пользователя"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT OR IGNORE INTO users 
+        (user_id, username, first_name, last_name, reg_date, last_active)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (user.id, user.username, user.first_name, user.last_name, 
+          datetime.now().isoformat(), datetime.now().isoformat()))
+    
+    conn.commit()
+    conn.close()
+
+def get_user(user_id):
+    """Получить пользователя"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    return user
+
+def update_balance(user_id, amount, description):
+    """Обновить баланс"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
+    cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+    new_balance = cursor.fetchone()[0]
+    
+    log_transaction(user_id, amount, 'balance_change', description)
+    
+    conn.commit()
+    conn.close()
+    return new_balance
 
 def is_admin(message):
     """Проверка, является ли пользователь администратором чата"""
@@ -135,260 +260,392 @@ def is_admin(message):
             return True
         
         # Проверяем права в чате
-        chat_member = bot.get_chat_member(chat_id, user_id)
-        return chat_member.status in ['administrator', 'creator']
+        if message.chat.type != 'private':
+            chat_member = bot.get_chat_member(chat_id, user_id)
+            return chat_member.status in ['administrator', 'creator']
+        return False
     except:
         return False
 
-def is_admin_id(chat_id, user_id):
-    """Проверка по ID"""
-    try:
-        if user_id == MAIN_ADMIN_ID:
-            return True
-        chat_member = bot.get_chat_member(chat_id, user_id)
-        return chat_member.status in ['administrator', 'creator']
-    except:
-        return False
-
-def get_chat_settings(chat_id):
-    """Получить настройки чата"""
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM chat_settings WHERE chat_id = ?', (chat_id,))
-    settings = cursor.fetchone()
-    conn.close()
-    
-    if not settings:
-        return {
-            'welcome_message': 'Добро пожаловать в чат!',
-            'rules': 'Правила чата: 1. Уважайте друг друга 2. Не спамить 3. Не материться',
-            'flood_protection': 1,
-            'spam_filter': 1,
-            'link_filter': 1,
-            'bad_words_filter': 1,
-            'captcha_enabled': 0,
-            'log_channel_id': None,
-            'welcome_enabled': 1
-        }
-    
-    return {
-        'welcome_message': settings[1],
-        'rules': settings[2],
-        'flood_protection': settings[3],
-        'spam_filter': settings[4],
-        'link_filter': settings[5],
-        'bad_words_filter': settings[6],
-        'captcha_enabled': settings[7],
-        'log_channel_id': settings[8],
-        'welcome_enabled': settings[9]
-    }
-
-def update_user_stats(chat_id, user_id):
-    """Обновить статистику пользователя"""
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        current_time = time.time()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO users (user_id, chat_id, messages_count, last_message_time, joined_date)
-            VALUES (?, ?, COALESCE((SELECT messages_count FROM users WHERE user_id = ? AND chat_id = ?), 0) + 1, ?, 
-            COALESCE((SELECT joined_date FROM users WHERE user_id = ? AND chat_id = ?), ?))
-        ''', (user_id, chat_id, user_id, chat_id, current_time, user_id, chat_id, datetime.now().isoformat()))
-        
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def check_flood(chat_id, user_id):
-    """Проверка на флуд"""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    settings = get_chat_settings(chat_id)
-    if not settings['flood_protection']:
-        conn.close()
+def is_premium(user_id):
+    """Проверка премиум статуса"""
+    user = get_user(user_id)
+    if not user:
         return False
     
-    current_time = time.time()
-    
-    cursor.execute('''
-        SELECT last_message_time FROM users 
-        WHERE user_id = ? AND chat_id = ?
-    ''', (user_id, chat_id))
-    
-    result = cursor.fetchone()
-    
-    if result:
-        last_time = result[0]
-        time_diff = current_time - last_time
-        
-        if time_diff < FLOOD_TIME:
-            conn.close()
-            return True
-    
-    conn.close()
-    return False
-
-def check_spam(text):
-    """Проверка на спам по ключевым словам"""
-    if not text:
-        return False
-    text_lower = text.lower()
-    for word in SPAM_KEYWORDS:
-        if word in text_lower:
+    if user[6]:  # is_premium
+        premium_until = datetime.fromisoformat(user[7]) if user[7] else None
+        if premium_until and premium_until > datetime.now():
             return True
     return False
 
-def check_bad_words(text):
-    """Проверка на мат"""
-    if not text:
-        return False
-    text_lower = text.lower()
-    for word in BAD_WORDS:
-        if word in text_lower:
-            return True
-    return False
-
-def count_links(text):
-    """Подсчет ссылок в тексте"""
-    if not text:
-        return 0
-    return len(re.findall(LINKS_REGEX, text, re.IGNORECASE))
-
-def is_user_muted(chat_id, user_id):
-    """Проверка, замьючен ли пользователь"""
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT muted_until FROM users WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result and result[0]:
-            muted_until = datetime.fromisoformat(result[0])
-            if datetime.now() < muted_until:
-                return True
-    except:
-        pass
-    return False
-
-# ========== КОМАНДЫ ДЛЯ ГРУПП ==========
+# ========== КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ==========
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
     """Запуск бота"""
-    if message.chat.type == 'private':
-        bot.reply_to(message, 
-            "🤖 <b>Бот-модератор для групп</b>\n\n"
-            "Добавь меня в группу и дай права администратора, чтобы я мог:\n"
-            "• Удалять спам и рекламу\n"
-            "• Банить нарушителей\n"
-            "• Приветствовать новых участников\n"
-            "• Защищать от флуда\n\n"
-            "Команды для админов:\n"
-            "/settings - настройки чата\n"
-            "/ban - забанить (ответом на сообщение)\n"
-            "/mute - замьютить (ответом)\n"
-            "/unmute - размьютить\n"
-            "/warn - предупреждение\n"
-            "/rules - правила чата\n"
-            "/clear - очистить сообщения",
-            parse_mode='html')
-    else:
-        bot.reply_to(message, "🤖 Бот-модератор активен! Используй /help для списка команд")
-
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    """Помощь"""
-    if message.chat.type == 'private':
-        return
+    user = message.from_user
+    add_user(user)
     
-    if is_admin(message):
-        help_text = """<b>🔰 КОМАНДЫ АДМИНИСТРАТОРА</b>
-
-<b>Модерация:</b>
-/ban [причина] - заблокировать пользователя (ответом)
-/mute [время в мин] [причина] - ограничить (ответом)
-/unmute - снять ограничение (ответом)
-/kick - выгнать (ответом)
-/warn [причина] - выдать предупреждение (ответом)
-/unwarn - снять предупреждение (ответом)
-/clear [количество] - удалить сообщения
-
-<b>Управление:</b>
-/settings - настройки чата
-/rules - показать правила
-/setrules [текст] - установить правила
-/setwelcome [текст] - установить приветствие
-/logchannel [id] - канал для логов
-/stats - статистика чата
-
-<b>Фильтры:</b>
-/addfilter [текст] - добавить фильтр
-/delfilter [id] - удалить фильтр
-/filters - список фильтров
-"""
-    else:
-        help_text = """<b>🔰 ДОСТУПНЫЕ КОМАНДЫ</b>
-
-/rules - правила чата
-/stats - статистика
-/report [причина] - пожаловаться на сообщение
-
-Для администраторов доступны команды модерации."""
-    
-    bot.reply_to(message, help_text, parse_mode='html')
-
-@bot.message_handler(commands=['settings'])
-def settings_command(message):
-    """Настройки чата"""
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Только админы могут менять настройки")
-        return
-    
-    chat_id = message.chat.id
-    settings = get_chat_settings(chat_id)
+    # Проверка реферала
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith('ref'):
+        referrer_id = int(args[1].replace('ref', ''))
+        if referrer_id != user.id:
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute('UPDATE users SET referrer_id = ? WHERE user_id = ?', (referrer_id, user.id))
+            
+            # Начисляем бонус рефереру
+            update_balance(referrer_id, 50, f"Реферал: {user.first_name}")
+            conn.commit()
+            conn.close()
     
     markup = types.InlineKeyboardMarkup(row_width=2)
-    
-    # Кнопки настроек
-    flood_status = "✅" if settings['flood_protection'] else "❌"
-    spam_status = "✅" if settings['spam_filter'] else "❌"
-    link_status = "✅" if settings['link_filter'] else "❌"
-    word_status = "✅" if settings['bad_words_filter'] else "❌"
-    welcome_status = "✅" if settings['welcome_enabled'] else "❌"
-    
-    btn1 = types.InlineKeyboardButton(f"{flood_status} Антифлуд", callback_data="toggle_flood")
-    btn2 = types.InlineKeyboardButton(f"{spam_status} Антиспам", callback_data="toggle_spam")
-    btn3 = types.InlineKeyboardButton(f"{link_status} Фильтр ссылок", callback_data="toggle_links")
-    btn4 = types.InlineKeyboardButton(f"{word_status} Фильтр мата", callback_data="toggle_words")
-    btn5 = types.InlineKeyboardButton(f"{welcome_status} Приветствие", callback_data="toggle_welcome")
-    btn6 = types.InlineKeyboardButton("📝 Правила", callback_data="show_rules")
-    btn7 = types.InlineKeyboardButton("📊 Статистика", callback_data="chat_stats")
-    btn8 = types.InlineKeyboardButton("❌ Закрыть", callback_data="close_settings")
-    
+    btn1 = types.InlineKeyboardButton("👤 Профиль", callback_data="profile")
+    btn2 = types.InlineKeyboardButton("💰 Баланс", callback_data="balance")
+    btn3 = types.InlineKeyboardButton("🏪 Магазин", callback_data="shop")
+    btn4 = types.InlineKeyboardButton("🎁 Бонус", callback_data="daily_bonus")
+    btn5 = types.InlineKeyboardButton("📜 Правила", callback_data="rules")
+    btn6 = types.InlineKeyboardButton("🆘 Помощь", callback_data="help")
+    btn7 = types.InlineKeyboardButton("💎 Премиум", callback_data="premium")
+    btn8 = types.InlineKeyboardButton("📞 Поддержка", callback_data="support")
     markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8)
     
-    settings_text = f"""<b>⚙️ НАСТРОЙКИ ЧАТА</b>
+    welcome = f"""<b>🌟 Moderate Artem</b>
 
-Текущие параметры:
-🛡 Антифлуд: {flood_status}
-🚫 Антиспам: {spam_status}
-🔗 Фильтр ссылок: {link_status}
-🤬 Фильтр мата: {word_status}
-👋 Приветствие: {welcome_status}
+Привет, {user.first_name}! 
+Я бот-модератор для твоих групп и чатов.
 
-Нажми на кнопку для изменения настройки."""
+<b>🎮 Внутренняя валюта: {CURRENCY_NAME}</b>
+• Получай {CURRENCY_NAME} за активность
+• Покупай статусы и премиум
+• Донать за звёзды Telegram
+
+<b>🔹 Основные возможности:</b>
+• Модерация групп (бан, мут, кик)
+• Антифлуд и антиспам
+• Статусы и роли
+• Премиум подписка
+• Рассылки для админов
+
+<b>🔹 Команды:</b>
+/profile - твой профиль
+/shop - магазин статусов
+/buy премиум - купить премиум
+/donate [сумма] - задонатить звёздами
+/referral - реферальная ссылка
+
+Выбери действие в меню ниже 👇"""
     
-    bot.send_message(chat_id, settings_text, parse_mode='html', reply_markup=markup)
+    bot.send_message(message.chat.id, welcome, parse_mode='html', reply_markup=markup)
+
+@bot.message_handler(commands=['profile'])
+def profile_command(message):
+    """Профиль пользователя"""
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    
+    if not user:
+        add_user(message.from_user)
+        user = get_user(user_id)
+    
+    # Получаем статистику
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM purchases WHERE user_id = ?', (user_id,))
+    purchases = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT COUNT(*) FROM donations WHERE user_id = ?', (user_id,))
+    donations = cursor.fetchone()[0]
+    conn.close()
+    
+    # Формируем профиль
+    reg_date = datetime.fromisoformat(user[4]).strftime('%d.%m.%Y')
+    last_active = datetime.fromisoformat(user[5]).strftime('%d.%m.%Y %H:%M')
+    
+    premium_status = "✅ Да" if is_premium(user_id) else "❌ Нет"
+    status_emoji = STATUSES.get(user[9], {}).get('emoji', '🌱')
+    
+    profile_text = f"""<b>👤 ТВОЙ ПРОФИЛЬ</b>
+
+🆔 ID: <code>{user_id}</code>
+👤 Имя: {message.from_user.first_name}
+🔖 Username: @{message.from_user.username or 'нет'}
+
+<b>📊 Статистика:</b>
+📅 Регистрация: {reg_date}
+⏰ Последний визит: {last_active}
+💬 Сообщений: {user[11]}
+🔧 Команд: {user[12]}
+
+<b>💰 Экономика:</b>
+💎 Баланс: {user[6]} {CURRENCY_NAME}
+⭐ Статус: {status_emoji} {user[9]}
+💎 Премиум: {premium_status}
+🛒 Покупок: {purchases}
+🎁 Донатов: {donations}
+
+<b>🔗 Реферальная ссылка:</b>
+https://t.me/{bot.get_me().username}?start=ref{user_id}"""
+    
+    markup = types.InlineKeyboardMarkup()
+    btn1 = types.InlineKeyboardButton("💰 Пополнить", callback_data="buy_balance")
+    btn2 = types.InlineKeyboardButton("🛒 Магазин", callback_data="shop")
+    markup.add(btn1, btn2)
+    
+    bot.send_message(message.chat.id, profile_text, parse_mode='html', reply_markup=markup)
+
+@bot.message_handler(commands=['balance'])
+def balance_command(message):
+    """Баланс"""
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    
+    if not user:
+        add_user(message.from_user)
+        user = get_user(user_id)
+    
+    # Получаем историю транзакций
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT amount, type, description, date FROM transactions 
+        WHERE user_id = ? ORDER BY date DESC LIMIT 5
+    ''', (user_id,))
+    transactions = cursor.fetchall()
+    conn.close()
+    
+    text = f"""<b>💰 ТВОЙ БАЛАНС</b>
+
+💎 Баланс: {user[6]} {CURRENCY_NAME}
+⭐ Статус: {user[9]}
+
+<b>📊 Последние операции:</b>
+"""
+    
+    for t in transactions:
+        sign = "+" if t[0] > 0 else ""
+        text += f"{sign}{t[0]} {CURRENCY_NAME} - {t[2]} ({t[3][:16]})\n"
+    
+    markup = types.InlineKeyboardMarkup()
+    btn1 = types.InlineKeyboardButton("💎 Купить", callback_data="buy_balance")
+    btn2 = types.InlineKeyboardButton("🎁 Бонус", callback_data="daily_bonus")
+    markup.add(btn1, btn2)
+    
+    bot.send_message(message.chat.id, text, parse_mode='html', reply_markup=markup)
+
+@bot.message_handler(commands=['shop'])
+def shop_command(message):
+    """Магазин статусов"""
+    text = "<b>🏪 МАГАЗИН СТАТУСОВ</b>\n\n"
+    
+    for status_name, status_info in STATUSES.items():
+        text += f"{status_info['emoji']} <b>{status_name}</b> - {status_info['price']} {CURRENCY_NAME}\n"
+    
+    text += "\n💎 <b>Премиум подписка:</b>\n"
+    text += "• Неделя: 1000 💰\n"
+    text += "• Месяц: 3000 💰\n"
+    text += "• Навсегда: 10000 💰\n\n"
+    text += "Купить: /buy [название]"
+    
+    bot.send_message(message.chat.id, text, parse_mode='html')
+
+@bot.message_handler(commands=['buy'])
+def buy_command(message):
+    """Покупка статуса"""
+    user_id = message.from_user.id
+    args = message.text.split(maxsplit=1)
+    
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Напиши что купить. Например: /buy Король")
+        return
+    
+    item = args[1].strip().capitalize()
+    
+    # Проверка статусов
+    if item in STATUSES:
+        price = STATUSES[item]['price']
+        user = get_user(user_id)
+        
+        if user[6] < price:
+            bot.reply_to(message, f"❌ Недостаточно {CURRENCY_NAME}! Нужно {price}")
+            return
+        
+        # Покупаем
+        new_balance = update_balance(user_id, -price, f"Покупка статуса {item}")
+        
+        # Сохраняем покупку
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO purchases (user_id, item_type, item_name, price, purchase_date)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, 'status', item, price, datetime.now().isoformat()))
+        
+        cursor.execute('UPDATE users SET status = ? WHERE user_id = ?', (item, user_id))
+        conn.commit()
+        conn.close()
+        
+        bot.reply_to(message, 
+            f"✅ Статус <b>{item}</b> куплен!\n"
+            f"💰 Остаток: {new_balance} {CURRENCY_NAME}",
+            parse_mode='html')
+    
+    elif item.lower() == 'премиум':
+        # Обработка покупки премиум
+        premium_menu(message)
+    
+    else:
+        bot.reply_to(message, "❌ Такого товара нет в магазине")
+
+@bot.message_handler(commands=['premium'])
+def premium_command(message):
+    """Премиум меню"""
+    premium_menu(message)
+
+def premium_menu(message):
+    """Меню премиум подписки"""
+    text = """<b>💎 PREMIUM ПОДПИСКА</b>
+
+<b>Преимущества:</b>
+✅ Админ-команды в любых чатах
+✅ Ежедневный бонус x2
+✅ Специальный статус
+✅ Доступ к эксклюзивным статусам
+✅ Приоритетная поддержка
+✅ +50% к доходу с рефералов
+
+<b>Стоимость:</b>
+• 1 неделя - 1000 💰
+• 1 месяц - 3000 💰
+• Навсегда - 10000 💰
+
+<b>Купить:</b>
+/premium_week - неделя
+/premium_month - месяц
+/premium_forever - навсегда"""
+    
+    bot.send_message(message.chat.id, text, parse_mode='html')
+
+@bot.message_handler(commands=['daily'])
+def daily_bonus_command(message):
+    """Ежедневный бонус"""
+    user_id = message.from_user.id
+    
+    # Проверяем, получал ли сегодня
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT date FROM transactions 
+        WHERE user_id = ? AND type = 'daily_bonus' 
+        AND date > ? ORDER BY date DESC LIMIT 1
+    ''', (user_id, (datetime.now() - timedelta(days=1)).isoformat()))
+    
+    last_bonus = cursor.fetchone()
+    
+    if last_bonus:
+        bot.reply_to(message, "❌ Ты уже получал бонус сегодня! Приходи завтра.")
+        conn.close()
+        return
+    
+    # Начисляем бонус
+    bonus_amount = 100
+    if is_premium(user_id):
+        bonus_amount *= 2
+    
+    new_balance = update_balance(user_id, bonus_amount, "Ежедневный бонус")
+    
+    cursor.execute('''
+        INSERT INTO transactions (user_id, amount, type, description, date)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user_id, bonus_amount, 'daily_bonus', 'Ежедневный бонус', datetime.now().isoformat()))
+    
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, 
+        f"🎁 <b>Ежедневный бонус получен!</b>\n"
+        f"+{bonus_amount} {CURRENCY_NAME}\n"
+        f"💰 Баланс: {new_balance}",
+        parse_mode='html')
+
+@bot.message_handler(commands=['donate'])
+def donate_command(message):
+    """Донат звёздами Telegram"""
+    user_id = message.from_user.id
+    args = message.text.split()
+    
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Укажи сумму в звёздах. Например: /donate 50")
+        return
+    
+    try:
+        stars = int(args[1])
+        if stars < 10:
+            bot.reply_to(message, "❌ Минимальный донат - 10 звёзд")
+            return
+        
+        # Курс: 1 звезда = 10 ирисок
+        iris_amount = stars * 10
+        
+        # Создаём счёт для оплаты звёздами
+        invoice = bot.create_invoice_link(
+            title=f"Пополнение {CURRENCY_NAME}",
+            description=f"{stars} ⭐ -> {iris_amount} {CURRENCY_NAME}",
+            payload=f"donate_{user_id}_{iris_amount}",
+            provider_token="",  # Для звёзд оставляем пустым
+            currency="XTR",  # XTR - звёзды Telegram
+            prices=[types.LabeledPrice(label=f"{stars} ⭐", amount=stars)]
+        )
+        
+        bot.send_message(user_id, f"💎 Ссылка для оплаты звёздами:\n{invoice}")
+        
+    except ValueError:
+        bot.reply_to(message, "❌ Неправильный формат суммы")
+
+@bot.message_handler(commands=['referral'])
+def referral_command(message):
+    """Реферальная программа"""
+    user_id = message.from_user.id
+    
+    # Статистика рефералов
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
+    referrals = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT SUM(amount) FROM transactions WHERE user_id = ? AND type = ?', 
+                  (user_id, 'referral_bonus'))
+    total_earned = cursor.fetchone()[0] or 0
+    conn.close()
+    
+    ref_link = f"https://t.me/{bot.get_me().username}?start=ref{user_id}"
+    
+    text = f"""<b>🔗 РЕФЕРАЛЬНАЯ ПРОГРАММА</b>
+
+👥 Пригласи друзей и получай бонусы!
+
+<b>Твоя статистика:</b>
+• Приглашено: {referrals} чел.
+• Заработано: {total_earned} {CURRENCY_NAME}
+
+<b>Бонусы:</b>
+• За каждого друга: +50 {CURRENCY_NAME}
+• За премиум друга: +200 {CURRENCY_NAME}
+
+<b>Твоя ссылка:</b>
+<code>{ref_link}</code>"""
+    
+    bot.send_message(message.chat.id, text, parse_mode='html')
+
+# ========== КОМАНДЫ МОДЕРАЦИИ ==========
 
 @bot.message_handler(commands=['ban'])
 def ban_command(message):
     """Бан пользователя"""
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Недостаточно прав")
+    if not is_admin(message) and not is_premium(message.from_user.id):
+        bot.reply_to(message, "❌ Недостаточно прав. Нужны права админа или премиум")
         return
     
     if not message.reply_to_message:
@@ -399,26 +656,53 @@ def ban_command(message):
     chat_id = message.chat.id
     admin_id = message.from_user.id
     
-    # Проверяем, не админ ли цель
-    if is_admin_id(chat_id, user_to_ban.id):
-        bot.reply_to(message, "❌ Нельзя забанить администратора")
-        return
-    
     reason = message.text.replace('/ban', '').strip() or 'Нарушение правил'
     
     try:
         bot.ban_chat_member(chat_id, user_to_ban.id)
         
-        # Уведомление
-        bot.send_message(chat_id, 
+        # Логируем
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO mod_actions (chat_id, user_id, admin_id, action, reason, date)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (chat_id, user_to_ban.id, admin_id, 'ban', reason, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        
+        bot.send_message(chat_id,
             f"🔨 <b>БАН</b>\n"
             f"Пользователь: {user_to_ban.first_name}\n"
             f"Причина: {reason}\n"
             f"Админ: {message.from_user.first_name}",
             parse_mode='html')
         
-        # Лог
-        log_action(chat_id, 'ban', user_to_ban.id, admin_id, reason)
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['unban'])
+def unban_command(message):
+    """Разбан пользователя"""
+    if not is_admin(message) and not is_premium(message.from_user.id):
+        bot.reply_to(message, "❌ Недостаточно прав")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя")
+        return
+    
+    user_to_unban = message.reply_to_message.from_user
+    chat_id = message.chat.id
+    
+    try:
+        bot.unban_chat_member(chat_id, user_to_unban.id)
+        
+        bot.send_message(chat_id,
+            f"✅ <b>РАЗБАН</b>\n"
+            f"Пользователь: {user_to_unban.first_name}\n"
+            f"Админ: {message.from_user.first_name}",
+            parse_mode='html')
         
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
@@ -426,7 +710,7 @@ def ban_command(message):
 @bot.message_handler(commands=['mute'])
 def mute_command(message):
     """Мут пользователя"""
-    if not is_admin(message):
+    if not is_admin(message) and not is_premium(message.from_user.id):
         bot.reply_to(message, "❌ Недостаточно прав")
         return
     
@@ -437,10 +721,6 @@ def mute_command(message):
     user_to_mute = message.reply_to_message.from_user
     chat_id = message.chat.id
     admin_id = message.from_user.id
-    
-    if is_admin_id(chat_id, user_to_mute.id):
-        bot.reply_to(message, "❌ Нельзя замьютить администратора")
-        return
     
     # Парсим время
     args = message.text.split()
@@ -465,13 +745,14 @@ def mute_command(message):
             can_send_messages=False
         )
         
-        # Сохраняем в БД
+        # Логируем
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT OR REPLACE INTO users (user_id, chat_id, muted_until)
-            VALUES (?, ?, ?)
-        ''', (user_to_mute.id, chat_id, until_date.isoformat()))
+            INSERT INTO mod_actions (chat_id, user_id, admin_id, action, reason, duration, date, expires)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (chat_id, user_to_mute.id, admin_id, 'mute', reason, mute_time, 
+              datetime.now().isoformat(), until_date.isoformat()))
         conn.commit()
         conn.close()
         
@@ -483,15 +764,13 @@ def mute_command(message):
             f"Админ: {message.from_user.first_name}",
             parse_mode='html')
         
-        log_action(chat_id, 'mute', user_to_mute.id, admin_id, reason)
-        
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
 @bot.message_handler(commands=['unmute'])
 def unmute_command(message):
     """Снятие мута"""
-    if not is_admin(message):
+    if not is_admin(message) and not is_premium(message.from_user.id):
         bot.reply_to(message, "❌ Недостаточно прав")
         return
     
@@ -512,21 +791,41 @@ def unmute_command(message):
             can_add_web_page_previews=True
         )
         
-        # Удаляем из БД
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('UPDATE users SET muted_until = NULL WHERE user_id = ? AND chat_id = ?', 
-                      (user_to_unmute.id, chat_id))
-        conn.commit()
-        conn.close()
-        
         bot.send_message(chat_id,
             f"🔊 <b>МУТ СНЯТ</b>\n"
             f"Пользователь: {user_to_unmute.first_name}\n"
             f"Админ: {message.from_user.first_name}",
             parse_mode='html')
         
-        log_action(chat_id, 'unmute', user_to_unmute.id, message.from_user.id)
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['kick'])
+def kick_command(message):
+    """Кик пользователя"""
+    if not is_admin(message) and not is_premium(message.from_user.id):
+        bot.reply_to(message, "❌ Недостаточно прав")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя")
+        return
+    
+    user_to_kick = message.reply_to_message.from_user
+    chat_id = message.chat.id
+    
+    reason = message.text.replace('/kick', '').strip() or 'Нарушение правил'
+    
+    try:
+        bot.ban_chat_member(chat_id, user_to_kick.id)
+        bot.unban_chat_member(chat_id, user_to_kick.id)
+        
+        bot.send_message(chat_id,
+            f"👢 <b>КИК</b>\n"
+            f"Пользователь: {user_to_kick.first_name}\n"
+            f"Причина: {reason}\n"
+            f"Админ: {message.from_user.first_name}",
+            parse_mode='html')
         
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
@@ -534,7 +833,7 @@ def unmute_command(message):
 @bot.message_handler(commands=['warn'])
 def warn_command(message):
     """Предупреждение"""
-    if not is_admin(message):
+    if not is_admin(message) and not is_premium(message.from_user.id):
         bot.reply_to(message, "❌ Недостаточно прав")
         return
     
@@ -546,134 +845,49 @@ def warn_command(message):
     chat_id = message.chat.id
     reason = message.text.replace('/warn', '').strip() or 'Нарушение правил'
     
-    if is_admin_id(chat_id, user.id):
-        bot.reply_to(message, "❌ Нельзя выдать предупреждение администратору")
-        return
-    
+    # Получаем текущие предупреждения
     conn = get_db()
     cursor = conn.cursor()
     
     cursor.execute('''
-        INSERT INTO users (user_id, chat_id, warns)
-        VALUES (?, ?, 1)
-        ON CONFLICT(user_id, chat_id) DO UPDATE SET
-        warns = warns + 1
-    ''', (user.id, chat_id))
+        INSERT INTO mod_actions (chat_id, user_id, admin_id, action, reason, date)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (chat_id, user.id, message.from_user.id, 'warn', reason, datetime.now().isoformat()))
     
+    # Считаем предупреждения за последние 30 дней
+    cursor.execute('''
+        SELECT COUNT(*) FROM mod_actions 
+        WHERE chat_id = ? AND user_id = ? AND action = 'warn'
+        AND date > ?
+    ''', (chat_id, user.id, (datetime.now() - timedelta(days=30)).isoformat()))
+    
+    warns_count = cursor.fetchone()[0]
     conn.commit()
-    
-    cursor.execute('SELECT warns FROM users WHERE user_id = ? AND chat_id = ?', (user.id, chat_id))
-    warns = cursor.fetchone()[0]
     conn.close()
     
     bot.send_message(chat_id,
         f"⚠️ <b>ПРЕДУПРЕЖДЕНИЕ</b>\n"
         f"Пользователь: {user.first_name}\n"
-        f"Предупреждений: {warns}/3\n"
+        f"Предупреждений: {warns_count}/{MAX_WARNS}\n"
         f"Причина: {reason}\n"
         f"Админ: {message.from_user.first_name}",
         parse_mode='html')
     
-    log_action(chat_id, 'warn', user.id, message.from_user.id, reason)
-    
-    # Автобан после 3 предупреждений
-    if warns >= 3:
+    # Автобан после MAX_WARNS предупреждений
+    if warns_count >= MAX_WARNS:
         try:
             bot.ban_chat_member(chat_id, user.id)
             bot.send_message(chat_id,
                 f"🔨 <b>АВТОМАТИЧЕСКИЙ БАН</b>\n"
-                f"Пользователь {user.first_name} забанен за 3 предупреждения",
+                f"{user.first_name} забанен за {MAX_WARNS} предупреждений",
                 parse_mode='html')
         except:
             pass
 
-@bot.message_handler(commands=['rules'])
-def rules_command(message):
-    """Показать правила"""
-    chat_id = message.chat.id
-    settings = get_chat_settings(chat_id)
-    
-    rules_text = f"""<b>📜 ПРАВИЛА ЧАТА</b>
-
-{settings['rules']}
-
-Нарушение правил влечет за собой:
-⚠️ Предупреждение
-🔇 Мут
-🔨 Бан"""
-    
-    bot.reply_to(message, rules_text, parse_mode='html')
-
-@bot.message_handler(commands=['setrules'])
-def setrules_command(message):
-    """Установить правила"""
-    if not is_admin(message):
-        bot.reply_to(message, "❌ Недостаточно прав")
-        return
-    
-    chat_id = message.chat.id
-    new_rules = message.text.replace('/setrules', '').strip()
-    
-    if not new_rules:
-        bot.reply_to(message, "❌ Напиши текст правил")
-        return
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO chat_settings (chat_id, rules)
-        VALUES (?, ?)
-    ''', (chat_id, new_rules))
-    conn.commit()
-    conn.close()
-    
-    bot.reply_to(message, "✅ Правила обновлены!")
-
-@bot.message_handler(commands=['stats'])
-def stats_command(message):
-    """Статистика чата"""
-    chat_id = message.chat.id
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Общая статистика
-    cursor.execute('SELECT COUNT(*) FROM users WHERE chat_id = ?', (chat_id,))
-    total_users = cursor.fetchone()[0]
-    
-    cursor.execute('SELECT SUM(messages_count) FROM users WHERE chat_id = ?', (chat_id,))
-    total_messages = cursor.fetchone()[0] or 0
-    
-    cursor.execute('SELECT COUNT(*) FROM moderation_logs WHERE chat_id = ?', (chat_id,))
-    total_mod_actions = cursor.fetchone()[0]
-    
-    cursor.execute('SELECT user_id, messages_count FROM users WHERE chat_id = ? ORDER BY messages_count DESC LIMIT 5', (chat_id,))
-    top_chatters = cursor.fetchall()
-    
-    conn.close()
-    
-    stats_text = f"""<b>📊 СТАТИСТИКА ЧАТА</b>
-
-👥 Всего участников: {total_users}
-💬 Всего сообщений: {total_messages}
-🛡 Действий модерации: {total_mod_actions}
-
-<b>Топ чаттеров:</b>
-"""
-    for i, (user_id, count) in enumerate(top_chatters, 1):
-        try:
-            user = bot.get_chat_member(chat_id, user_id).user
-            name = user.first_name
-        except:
-            name = "Неизвестный"
-        stats_text += f"{i}. {name}: {count} сообщ.\n"
-    
-    bot.reply_to(message, stats_text, parse_mode='html')
-
 @bot.message_handler(commands=['clear'])
 def clear_command(message):
     """Очистка сообщений"""
-    if not is_admin(message):
+    if not is_admin(message) and not is_premium(message.from_user.id):
         bot.reply_to(message, "❌ Недостаточно прав")
         return
     
@@ -682,251 +896,513 @@ def clear_command(message):
     
     try:
         count = int(args[1]) if len(args) > 1 else 10
-        count = min(count, 100)  # Не больше 100 за раз
+        count = min(count, 100)
         
         # Удаляем команду
         bot.delete_message(chat_id, message.message_id)
         
-        # Удаляем указанное количество сообщений
+        # Удаляем сообщения
+        deleted = 0
         for i in range(count):
             try:
                 bot.delete_message(chat_id, message.message_id - i - 1)
+                deleted += 1
             except:
                 pass
         
-        bot.send_message(chat_id, f"✅ Удалено {count} сообщений")
+        status = bot.send_message(chat_id, f"✅ Удалено {deleted} сообщений")
+        
+        # Удаляем статус через 3 секунды
+        time.sleep(3)
+        bot.delete_message(chat_id, status.message_id)
         
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
-# ========== ОБРАБОТКА НОВЫХ УЧАСТНИКОВ ==========
+# ========== АДМИН КОМАНДЫ ==========
 
-@bot.message_handler(content_types=['new_chat_members'])
-def welcome_new_member(message):
-    """Приветствие новых участников"""
-    for new_member in message.new_chat_members:
-        if new_member.id == bot.get_me().id:
-            # Бота добавили в группу
-            bot.send_message(message.chat.id,
-                "🤖 <b>Спасибо что добавили меня!</b>\n"
-                "Выдайте мне права администратора для работы.\n"
-                "/settings - настройки чата",
-                parse_mode='html')
-            return
-        
-        chat_id = message.chat.id
-        settings = get_chat_settings(chat_id)
-        
-        if settings['welcome_enabled']:
-            welcome = settings['welcome_message'].replace('{name}', new_member.first_name)
-            
-            markup = types.InlineKeyboardMarkup()
-            btn = types.InlineKeyboardButton("📜 Правила", callback_data="show_rules")
-            markup.add(btn)
-            
-            bot.send_message(chat_id, welcome, parse_mode='html', reply_markup=markup)
-        
-        # Сохраняем в БД
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR IGNORE INTO users (user_id, chat_id, joined_date)
-            VALUES (?, ?, ?)
-        ''', (new_member.id, chat_id, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
-
-@bot.message_handler(content_types=['left_chat_member'])
-def goodbye_member(message):
-    """Прощание при выходе"""
-    left_member = message.left_chat_member
-    if left_member.id != bot.get_me().id:
-        bot.send_message(message.chat.id, f"👋 Пользователь {left_member.first_name} покинул чат")
-
-# ========== МОДЕРАЦИЯ СООБЩЕНИЙ ==========
-
-@bot.message_handler(func=lambda message: message.chat.type != 'private')
-def moderate_message(message):
-    """Модерация сообщений"""
-    if not message.text:
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
+    """Панель администратора"""
+    if message.from_user.id != MAIN_ADMIN_ID:
+        bot.reply_to(message, "❌ Доступ запрещён")
         return
     
-    chat_id = message.chat.id
+    text = """<b>👑 АДМИН ПАНЕЛЬ</b>
+
+<b>Статистика:</b>
+/stats - общая статистика
+/users - список пользователей
+/groups - список групп
+
+<b>Управление:</b>
+/mailing - рассылка
+/support - обращения в поддержку
+/promo - промокоды
+
+<b>Экономика:</b>
+/add_balance [id] [сумма] - начислить
+/remove_balance [id] [сумма] - списать
+/give_premium [id] [дней] - выдать премиум
+
+<b>Настройки:</b>
+/set_spam_keywords - спам слова
+/set_bad_words - мат слова
+/settings - настройки бота"""
+    
+    bot.send_message(message.chat.id, text, parse_mode='html')
+
+@bot.message_handler(commands=['stats'])
+def admin_stats(message):
+    """Общая статистика"""
+    if message.from_user.id != MAIN_ADMIN_ID:
+        bot.reply_to(message, "❌ Доступ запрещён")
+        return
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT COUNT(*) FROM users')
+    total_users = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT COUNT(*) FROM groups')
+    total_groups = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT SUM(balance) FROM users')
+    total_balance = cursor.fetchone()[0] or 0
+    
+    cursor.execute('SELECT COUNT(*) FROM users WHERE is_premium = 1')
+    premium_users = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT SUM(amount) FROM donations')
+    total_donations = cursor.fetchone()[0] or 0
+    
+    cursor.execute('SELECT COUNT(*) FROM mod_actions WHERE date > ?', 
+                  ((datetime.now() - timedelta(days=1)).isoformat(),))
+    actions_today = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    text = f"""<b>📊 ОБЩАЯ СТАТИСТИКА</b>
+
+👥 Пользователей: {total_users}
+👥 Премиум: {premium_users}
+👥 Групп: {total_groups}
+
+💰 Всего {CURRENCY_NAME}: {total_balance}
+🎁 Донатов: {total_donations} ⭐
+🛡 Действий сегодня: {actions_today}
+
+📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
+    
+    bot.send_message(message.chat.id, text, parse_mode='html')
+
+@bot.message_handler(commands=['mailing'])
+def mailing_command(message):
+    """Рассылка сообщений"""
+    if message.from_user.id != MAIN_ADMIN_ID:
+        bot.reply_to(message, "❌ Доступ запрещён")
+        return
+    
+    msg = bot.reply_to(message, "📢 Введи текст для рассылки:")
+    bot.register_next_step_handler(msg, process_mailing)
+
+def process_mailing(message):
+    """Обработка рассылки"""
+    if message.from_user.id != MAIN_ADMIN_ID:
+        return
+    
+    text = message.text
+    
+    # Подтверждение
+    markup = types.InlineKeyboardMarkup()
+    btn1 = types.InlineKeyboardButton("✅ Отправить всем", callback_data="mailing_all")
+    btn2 = types.InlineKeyboardButton("👑 Только премиум", callback_data="mailing_premium")
+    btn3 = types.InlineKeyboardButton("❌ Отмена", callback_data="mailing_cancel")
+    markup.add(btn1, btn2, btn3)
+    
+    bot.reply_to(message, 
+        f"📢 <b>Предпросмотр рассылки:</b>\n\n{text}\n\nКому отправляем?",
+        parse_mode='html', reply_markup=markup)
+    
+    # Сохраняем текст
+    global mailing_text
+    mailing_text = text
+
+@bot.message_handler(commands=['add_balance'])
+def add_balance_admin(message):
+    """Начисление баланса (админ)"""
+    if message.from_user.id != MAIN_ADMIN_ID:
+        bot.reply_to(message, "❌ Доступ запрещён")
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        bot.reply_to(message, "❌ Используй: /add_balance [user_id] [сумма]")
+        return
+    
+    try:
+        user_id = int(args[1])
+        amount = int(args[2])
+        
+        new_balance = update_balance(user_id, amount, f"Начислено администратором")
+        
+        bot.reply_to(message, f"✅ Пользователю {user_id} начислено {amount} {CURRENCY_NAME}\nНовый баланс: {new_balance}")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+# ========== ОБРАТНАЯ СВЯЗЬ ==========
+
+@bot.message_handler(commands=['support'])
+def support_command(message):
+    """Обратная связь"""
+    text = """<b>📞 ПОДДЕРЖКА</b>
+
+Выбери тип обращения:
+
+1️⃣ Вопрос по боту
+2️⃣ Жалоба на пользователя
+3️⃣ Предложение по улучшению
+4️⃣ Проблема с оплатой
+5️⃣ Другое
+
+Напиши свой вопрос, и администратор ответит в ближайшее время.
+Ответ придёт в личные сообщения."""
+    
+    bot.send_message(message.chat.id, text, parse_mode='html')
+    
+    msg = bot.reply_to(message, "✍️ Опишите вашу проблему:")
+    bot.register_next_step_handler(msg, process_support)
+
+def process_support(message):
+    """Обработка обращения"""
     user_id = message.from_user.id
     text = message.text
     
-    settings = get_chat_settings(chat_id)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO support (user_id, message, date, status)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, text, datetime.now().isoformat(), 'open'))
+    support_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
     
-    # Обновляем статистику
-    update_user_stats(chat_id, user_id)
+    # Уведомление админу
+    admin_text = f"""<b>📞 НОВОЕ ОБРАЩЕНИЕ #{support_id}</b>
+
+👤 Пользователь: {message.from_user.first_name} (@{message.from_user.username})
+🆔 ID: {user_id}
+
+📝 Сообщение:
+{text}
+
+Чтобы ответить: /reply {support_id} [текст]"""
     
-    # Проверка на мут
-    if is_user_muted(chat_id, user_id):
-        bot.delete_message(chat_id, message.message_id)
-        bot.send_message(chat_id, f"🔇 {message.from_user.first_name}, у вас мут. Нельзя писать.")
+    bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode='html')
+    
+    bot.reply_to(message, "✅ Ваше обращение отправлено! Администратор ответит в ближайшее время.")
+
+@bot.message_handler(commands=['reply'])
+def reply_support(message):
+    """Ответ на обращение (админ)"""
+    if message.from_user.id != MAIN_ADMIN_ID:
+        bot.reply_to(message, "❌ Доступ запрещён")
         return
     
-    # Пропускаем админов
-    if is_admin_id(chat_id, user_id):
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        bot.reply_to(message, "❌ Используй: /reply [номер] [текст]")
         return
     
-    reasons = []
-    
-    # Антифлуд
-    if settings['flood_protection'] and check_flood(chat_id, user_id):
-        reasons.append("Флуд")
-        bot.delete_message(chat_id, message.message_id)
-        bot.send_message(chat_id, f"⚠️ {message.from_user.first_name}, не флуди!")
-        return
-    
-    # Фильтр ссылок
-    if settings['link_filter']:
-        link_count = count_links(text)
-        if link_count > MAX_URLS:
-            reasons.append(f"Ссылки ({link_count})")
-            bot.delete_message(chat_id, message.message_id)
-    
-    # Фильтр спама
-    if settings['spam_filter'] and check_spam(text):
-        reasons.append("Спам/Реклама")
-        bot.delete_message(chat_id, message.message_id)
-    
-    # Фильтр мата
-    if settings['bad_words_filter'] and check_bad_words(text):
-        reasons.append("Мат")
-        bot.delete_message(chat_id, message.message_id)
-    
-    # Длина сообщения
-    if len(text) > MAX_MESSAGE_LENGTH:
-        reasons.append("Слишком длинное сообщение")
-        bot.delete_message(chat_id, message.message_id)
-    
-    # Если есть нарушения
-    if reasons:
-        reason_text = ", ".join(reasons)
-        warning = bot.send_message(chat_id,
-            f"⚠️ {message.from_user.first_name}, ваше сообщение удалено!\nПричина: {reason_text}")
+    try:
+        support_id = int(args[1])
+        reply_text = args[2]
         
-        log_action(chat_id, 'auto_delete', user_id, reason=reason_text)
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, message FROM support WHERE id = ?', (support_id,))
+        support = cursor.fetchone()
+        
+        if not support:
+            bot.reply_to(message, "❌ Обращение не найдено")
+            conn.close()
+            return
+        
+        user_id, original = support
+        
+        cursor.execute('UPDATE support SET reply = ?, status = ? WHERE id = ?', 
+                      (reply_text, 'closed', support_id))
+        conn.commit()
+        conn.close()
+        
+        # Отправляем ответ пользователю
+        bot.send_message(user_id,
+            f"<b>📞 Ответ на обращение #{support_id}</b>\n\n"
+            f"Ваш вопрос: {original}\n\n"
+            f"Ответ администратора:\n{reply_text}",
+            parse_mode='html')
+        
+        bot.reply_to(message, f"✅ Ответ отправлен пользователю {user_id}")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+# ========== ПОЛИТИКА И ОФЕРТА ==========
+
+@bot.message_handler(commands=['policy'])
+def policy_command(message):
+    """Политика конфиденциальности"""
+    text = """<b>🔒 ПОЛИТИКА КОНФИДЕНЦИАЛЬНОСТИ</b>
+
+1. <b>Сбор данных</b>
+Мы собираем минимально необходимые данные:
+• Ваш Telegram ID
+• Имя пользователя
+• История обращений в поддержку
+• История покупок
+
+2. <b>Использование данных</b>
+Данные используются только для:
+• Работы бота
+• Начисления баланса
+• Ответов на обращения
+• Улучшения сервиса
+
+3. <b>Защита данных</b>
+• Все данные хранятся в зашифрованном виде
+• Доступ к данным есть только у администратора
+• Данные не передаются третьим лицам
+
+4. <b>Ваши права</b>
+Вы можете:
+• Запросить удаление данных
+• Экспортировать свои данные
+• Отозвать согласие на обработку
+
+По вопросам: /support"""
+    
+    bot.send_message(message.chat.id, text, parse_mode='html')
+
+@bot.message_handler(commands=['offer'])
+def offer_command(message):
+    """Договор оферты"""
+    text = """<b>📜 ДОГОВОР ОФЕРТЫ</b>
+
+1. <b>Общие положения</b>
+Настоящий договор является публичной офертой и регулирует отношения между пользователем и ботом Moderate Artem.
+
+2. <b>Предмет договора</b>
+Бот предоставляет услуги модерации и виртуальную валюту "{CURRENCY_NAME}".
+
+3. <b>Виртуальная валюта</b>
+• {CURRENCY_NAME} - внутриигровая валюта
+• Может быть получена за активность
+• Может быть куплена за звёзды Telegram
+• Не подлежит обмену на реальные деньги
+• Не возвращается при блокировке
+
+4. <b>Права и обязанности</b>
+Пользователь обязуется:
+• Не нарушать правила чатов
+• Не пытаться взломать бота
+• Не использовать бота для спама
+
+5. <b>Ответственность</b>
+Администрация не несёт ответственности за:
+• Потерю данных
+• Сбои в работе Telegram
+• Действия других пользователей
+
+6. <b>Блокировка</b>
+Администрация имеет право заблокировать пользователя за:
+• Нарушение правил
+• Попытку взлома
+• Мошенничество
+
+7. <b>Изменение условий</b>
+Администрация может изменять условия с уведомлением пользователей.
+
+Используя бота, вы соглашаетесь с условиями."""
+    
+    bot.send_message(message.chat.id, text, parse_mode='html')
 
 # ========== ОБРАБОТКА КНОПОК ==========
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
+    """Обработка инлайн кнопок"""
     chat_id = call.message.chat.id
     message_id = call.message.message_id
     
-    if call.data == "toggle_flood":
-        settings = get_chat_settings(chat_id)
-        new_value = 0 if settings['flood_protection'] else 1
+    if call.data == "profile":
+        profile_command(call.message)
         
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO chat_settings (chat_id, flood_protection)
-            VALUES (?, ?)
-        ''', (chat_id, new_value))
-        conn.commit()
-        conn.close()
+    elif call.data == "balance":
+        balance_command(call.message)
         
-        bot.answer_callback_query(call.id, f"Антифлуд {'включен' if new_value else 'выключен'}")
-        settings_command(call.message)  # Обновляем сообщение
+    elif call.data == "shop":
+        shop_command(call.message)
         
-    elif call.data == "toggle_spam":
-        settings = get_chat_settings(chat_id)
-        new_value = 0 if settings['spam_filter'] else 1
+    elif call.data == "daily_bonus":
+        daily_bonus_command(call.message)
         
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO chat_settings (chat_id, spam_filter)
-            VALUES (?, ?)
-        ''', (chat_id, new_value))
-        conn.commit()
-        conn.close()
+    elif call.data == "rules":
+        rules = """<b>📜 ПРАВИЛА БОТА</b>
+
+1. Уважай других пользователей
+2. Не спамь
+3. Не матерись
+4. Не рекламируй
+5. Не пытайся взломать бота
+6. Не покупай валюту у других
+7. Сообщай о багах в поддержку
+
+Нарушение правил = блокировка без возврата средств"""
+        bot.send_message(chat_id, rules, parse_mode='html')
         
-        bot.answer_callback_query(call.id, f"Антиспам {'включен' if new_value else 'выключен'}")
-        settings_command(call.message)
+    elif call.data == "help":
+        help_text = """<b>🆘 ПОМОЩЬ</b>
+
+<b>Основные команды:</b>
+/profile - твой профиль
+/balance - баланс
+/shop - магазин статусов
+/buy [название] - купить статус
+/premium - премиум подписка
+/daily - ежедневный бонус
+/donate [сумма] - донат звёздами
+/support - поддержка
+
+<b>Команды модерации (в группах):</b>
+/ban - заблокировать
+/unban - разблокировать
+/mute - ограничить
+/unmute - снять ограничение
+/kick - выгнать
+/warn - предупредить
+/clear - очистить сообщения
+
+<b>Документы:</b>
+/policy - политика конфиденциальности
+/offer - договор оферты"""
+        bot.send_message(chat_id, help_text, parse_mode='html')
         
-    elif call.data == "toggle_links":
-        settings = get_chat_settings(chat_id)
-        new_value = 0 if settings['link_filter'] else 1
+    elif call.data == "premium":
+        premium_menu(call.message)
         
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO chat_settings (chat_id, link_filter)
-            VALUES (?, ?)
-        ''', (chat_id, new_value))
-        conn.commit()
-        conn.close()
+    elif call.data == "support":
+        support_command(call.message)
         
-        bot.answer_callback_query(call.id, f"Фильтр ссылок {'включен' if new_value else 'выключен'}")
-        settings_command(call.message)
-        
-    elif call.data == "toggle_words":
-        settings = get_chat_settings(chat_id)
-        new_value = 0 if settings['bad_words_filter'] else 1
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO chat_settings (chat_id, bad_words_filter)
-            VALUES (?, ?)
-        ''', (chat_id, new_value))
-        conn.commit()
-        conn.close()
-        
-        bot.answer_callback_query(call.id, f"Фильтр мата {'включен' if new_value else 'выключен'}")
-        settings_command(call.message)
-        
-    elif call.data == "toggle_welcome":
-        settings = get_chat_settings(chat_id)
-        new_value = 0 if settings['welcome_enabled'] else 1
-        
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO chat_settings (chat_id, welcome_enabled)
-            VALUES (?, ?)
-        ''', (chat_id, new_value))
-        conn.commit()
-        conn.close()
-        
-        bot.answer_callback_query(call.id, f"Приветствие {'включено' if new_value else 'выключено'}")
-        settings_command(call.message)
-        
-    elif call.data == "show_rules":
-        settings = get_chat_settings(chat_id)
-        bot.answer_callback_query(call.id)
-        bot.send_message(chat_id, 
-            f"<b>📜 ПРАВИЛА ЧАТА</b>\n\n{settings['rules']}", 
+    elif call.data == "buy_balance":
+        bot.send_message(chat_id,
+            "💎 <b>Пополнение баланса</b>\n\n"
+            "1 звезда = 10 ирисок\n\n"
+            "Напиши /donate [количество звёзд]\n"
+            "Например: /donate 50",
             parse_mode='html')
+    
+    elif call.data.startswith("mailing_"):
+        if call.from_user.id != MAIN_ADMIN_ID:
+            bot.answer_callback_query(call.id, "❌ Нет прав")
+            return
         
-    elif call.data == "chat_stats":
-        bot.answer_callback_query(call.id)
-        stats_command(call.message)
+        action = call.data.replace("mailing_", "")
         
-    elif call.data == "close_settings":
-        bot.answer_callback_query(call.id)
-        bot.delete_message(chat_id, message_id)
+        if action == "cancel":
+            bot.edit_message_text("❌ Рассылка отменена", chat_id, message_id)
+            
+        elif action in ["all", "premium"]:
+            bot.edit_message_text(f"📢 Рассылка началась...", chat_id, message_id)
+            
+            # Получаем список пользователей
+            conn = get_db()
+            cursor = conn.cursor()
+            
+            if action == "all":
+                cursor.execute('SELECT user_id FROM users')
+            else:
+                cursor.execute('SELECT user_id FROM users WHERE is_premium = 1')
+            
+            users = cursor.fetchall()
+            conn.close()
+            
+            sent = 0
+            failed = 0
+            
+            for user in users:
+                try:
+                    bot.send_message(user[0], mailing_text, parse_mode='html')
+                    sent += 1
+                    time.sleep(0.05)  # Защита от флуда
+                except:
+                    failed += 1
+            
+            bot.send_message(chat_id,
+                f"📢 <b>Рассылка завершена</b>\n"
+                f"✅ Отправлено: {sent}\n"
+                f"❌ Не доставлено: {failed}",
+                parse_mode='html')
+
+# ========== МОДЕРАЦИЯ СООБЩЕНИЙ ==========
+
+@bot.message_handler(func=lambda message: message.chat.type != 'private')
+def moderate_messages(message):
+    """Модерация сообщений в группах"""
+    if not message.text:
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # Пропускаем админов
+    if is_admin(message):
+        return
+    
+    # Проверка на спам
+    text_lower = message.text.lower()
+    
+    # Проверка ссылок
+    links = re.findall(LINKS_REGEX, message.text, re.IGNORECASE)
+    if links and len(links) > 2:
+        bot.delete_message(chat_id, message.message_id)
+        bot.send_message(chat_id, f"🔗 {message.from_user.first_name}, слишком много ссылок!")
+        return
+    
+    # Проверка мата
+    for word in BAD_WORDS:
+        if word in text_lower:
+            bot.delete_message(chat_id, message.message_id)
+            bot.send_message(chat_id, f"🤬 {message.from_user.first_name}, не матерись!")
+            return
+    
+    # Проверка спам слов
+    for word in SPAM_KEYWORDS:
+        if word in text_lower:
+            bot.delete_message(chat_id, message.message_id)
+            bot.send_message(chat_id, f"🚫 {message.from_user.first_name}, реклама запрещена!")
+            return
 
 # ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("🚀 БОТ-МОДЕРАТОР ЗАПУЩЕН!")
+    print("🤖 MODERATE ARTEM ЗАПУЩЕН!")
     print("=" * 50)
-    print(f"🤖 Имя: {bot.get_me().first_name}")
-    print(f"🆔 ID: {bot.get_me().id}")
+    print(f"📌 Бот: @{bot.get_me().username}")
+    print(f"📌 Валюта: {CURRENCY_NAME}")
+    print(f"📌 Админ ID: {MAIN_ADMIN_ID}")
     print("=" * 50)
-    print("📌 Функции модерации:")
-    print("✓ Бан / Мут / Кик")
-    print("✓ Антифлуд")
-    print("✓ Фильтр ссылок")
-    print("✓ Фильтр мата")
-    print("✓ Приветствие")
-    print("✓ Статистика")
+    print("✅ Функции загружены:")
+    print("✓ Модерация групп")
+    print("✓ Экономика и статусы")
+    print("✓ Премиум подписка")
+    print("✓ Донат звёздами")
+    print("✓ Реферальная система")
+    print("✓ Рассылки")
+    print("✓ Поддержка")
     print("=" * 50)
     
     while True:
