@@ -15,7 +15,7 @@ TOKEN = "8259179783:AAHuDseoX6aULdjsWPXT-zWWSNH9-nt6s6U"
 bot = telebot.TeleBot(TOKEN)
 
 # ID главного админа (твой ID)
-MAIN_ADMIN_ID = 8779825034
+MAIN_ADMIN_ID = 6673624565
 
 # Название валюты
 CURRENCY_NAME = "Ириски"
