@@ -12,7 +12,7 @@ from enum import Enum
 
 # ========== НАСТРОЙКИ ==========
 
-TOKEN = "8259179783:AAHuDseoX6aULdjsWPXT-zWWSNH9-nt6s6U"
+TOKEN = "8771964957:AAFA7TgWRPHlPXwzeP86a2ZxaLVTj3jmUAk"
 bot = telebot.TeleBot(TOKEN)
 
 # ID главного админа
