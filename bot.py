@@ -10,7 +10,7 @@ from forex_python.converter import CurrencyRates
 import random
 
 # Токен бота
-TOKEN = "8259179783:AAHuDseoX6aULdjsWPXT-zWWSNH9-nt6s6U"
+TOKEN = "8644453329:AAFv7ao7QyryWG_LbO32bg24njFSOLWxbE4"
 bot = telebot.TeleBot(TOKEN)
 
 # ID главного админа
